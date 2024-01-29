@@ -1,8 +1,6 @@
 from functools import reduce
-
 from peewee import *
-from typing import *
-from typing import Optional, List, Dict, Tuple, Any, Type, Union
+from typing import List, Dict, Tuple, Any, Type
 
 
 # соединение с нашей базой данных
@@ -63,6 +61,8 @@ class Order(BaseModel):
     cancellation_reason = TextField(null=True)
     user_id = ForeignKeyField(User, backref='orders')
     basket_id = ForeignKeyField(Basket, backref='orders')
+    order_number = IntegerField()
+
 
 
 class GoodComment(BaseModel):
@@ -134,9 +134,9 @@ class FoodServiceDB:
 
                     good = Good.get_by_id(item.good_id)
 
-                    bask_data = item.__dict__['__data__']
-                    bask_data['user_id'] = u_id.__dict__['__data__']
-                    bask_data['good_id'] = good.__dict__['__data__']
+                    bask_data = item.__data__
+                    bask_data['user_id'] = u_id.__data__
+                    bask_data['good_id'] = good.__data__
                     dt_list.append(
                         bask_data
                     )
@@ -174,7 +174,7 @@ class FoodServiceDB:
 
         :param user_id: Идентификатор пользователя.
         :param good_id: Идентификатор товара.
-        :param field: Поле для идентификации пользователя (например, "tg_id" или "vk_id").
+        :param field: Поле для идентификации пользователя ("tg_id" или "vk_id").
         :return: Кортеж, содержащий общее количество и общую сумму, если записи существуют, в противном случае пустой кортеж.
         """
         try:
@@ -204,7 +204,7 @@ class FoodServiceDB:
         except Exception as e:
             raise
 
-    def delete_all_record(self, table: str, **params: Dict) -> int:
+    def delete_all_records(self, table: str, **params: Dict) -> int:
         """
         Удаление всех записей из указанной таблицы, которые соответвуют переданным параметрам.
 
@@ -308,25 +308,28 @@ class FoodServiceDB:
         """
         try:
             new_rec: User = User.create(**udata)
-            return new_rec.__dict__['__data__'] if new_rec else {}
+            return new_rec.__data__ if new_rec else {}
         except Exception as e:
             raise
 
-    def add_record(self, table: str, **params: Dict[str, Any]) -> Dict:
+    def add_record(self, table: str, **values: Dict[str, Any]) -> Dict:
         """
         Добавление новой записи в указанную таблицу с заданными параметрами.
 
         :param table: Название таблицы для добавления записи.
-        :param params: Словарь с парами поле-значение для новой записи.
-        :return: Словарь с данными новой записи при успешном добавлении, {} в противном случае.
+        :param values: Словарь с парами поле-значение для новой записи.
+        :return: Словарь с данными новой записи при успешном добавлении, в противном случае будет вызвано исключение.
         """
         table = self.__normalize_table_name(table)
         model = globals().get(table)
         if model and issubclass(model, Model):
             try:
-                new_rec: Model = model.create(**params)
+                new_rec: Model = model.create(**values)
                 new_rec.save()
-                return new_rec.__dict__['__data__'] if new_rec else {}
+                if new_rec:
+                    return new_rec.__data__
+                else:
+                    raise ValueError(f"Ошибка добавления новой записи в таблицу '{table}'")
             except Exception as e:
                 raise
         else:
@@ -334,7 +337,8 @@ class FoodServiceDB:
 
     def get_record(self, table: str, **params: dict) -> Dict:
         """
-        Получение записи из указанной таблицы с заданными параметрами.
+        Получение записи из указанной таблицы с заданными параметрами,
+        если праметры не указаны метод вернет первую запись из указанной таблицы.
 
         :param table: Название таблицы.
         :param params: Словарь параметров для условия выборки записи.
@@ -354,7 +358,7 @@ class FoodServiceDB:
                                    model.select())
                     # Получаем запись
                     res = query.first()
-                return res.__dict__['__data__'] if res else {}
+                return res.__data__ if res else {}
             except Exception as e:
                 raise
         else:
@@ -372,7 +376,7 @@ class FoodServiceDB:
             model = globals().get(table)
             if model and issubclass(model, Model):
                 dt = model.select().execute()
-                return [i.__dict__['__data__'] for i in dt] if dt else []
+                return [i.__data__ for i in dt] if dt else []
             raise ValueError(f"Таблица '{table}' не поддерживается или не существует.")
         except Exception as e:
             raise
@@ -388,7 +392,7 @@ class FoodServiceDB:
 
         try:
             rec = User.select().where(User.tg_id == user_id).first()
-            return rec.__dict__['__data__'] if rec else {}
+            return rec.__data__ if rec else {}
         except Exception as e:
             raise
 
@@ -402,8 +406,8 @@ class FoodServiceDB:
         """
 
         try:
-            rec = User.select().where(User.vk_id == user_id)
-            return rec.__dict__['__data__'] if rec else {}
+            rec = User.select().where(User.vk_id == user_id).first()
+            return rec.__data__ if rec else {}
         except Exception as e:
             raise
 
@@ -487,7 +491,7 @@ class FoodServiceDB:
             dt = []
 
             for g in goods:
-                dt.append(g.__dict__['__data__'])
+                dt.append(g.__data__)
             return dt
         except Exception as e:
             raise
@@ -524,9 +528,9 @@ class FoodServiceDB:
             if orders:
                 basket = Basket.get_or_none(Basket.user_id == user.id)
                 for ord in orders:
-                    dt_ord = ord.__dict__['__data__']
-                    dt_ord["user_id"] = user.__dict__['__data__']
-                    dt_ord["basket_id"] = basket.__dict__['__data__']
+                    dt_ord = ord.__data__
+                    dt_ord["user_id"] = user.__data__
+                    dt_ord["basket_id"] = basket.__data__
                     data.append(dt_ord)
                 return data
             else:
@@ -550,7 +554,7 @@ class FoodServiceDB:
             orders = Order.select().where((Order.user_id == u_id) & (Order.status == 'Доставлен'))
             if orders:
                 for ord in orders:
-                    data.append(ord.__dict__['__data__'])
+                    data.append(ord.__data__)
                 return data
             else:
                 return []
@@ -572,17 +576,90 @@ class FoodServiceDB:
                                   .order_by(GoodComment.id.desc())\
                                   .limit(5)
             for com in comments:
-                rec = com.__dict__['__data__']
-                user_id = User.get(rec['user_id'])
-                good_id = Good.get(rec['good_id'])
+                rec = com.__data__
+                u = User.get(rec['user_id'])
+                g = Good.get(rec['good_id'])
 
-                rec['user_id'] = user_id.__dict__['__data__']
-                rec['good_id'] = good_id.__dict__['__data__']
+                rec['user_id'] = u.__data__
+                rec['good_id'] = g.__data__
 
                 data.append(rec)
             return data
         except Exception as e:
             raise
 
+    def __add_orders(self, ord_tm: str, deliv_tm: str, ord_p: float, status: str, pay_m: str, user_id: int, ufield: str) -> List[Any]:
+        """
+        Добавляет записи в таблицу 'Order' для каждой корзины пользователя, поле 'Order.order_numer'
+        заполняется автоматически.
+
+        :param ord_tm: Время размещения заказа.
+        :param deliv_tm: Время доставки заказа.
+        :param ord_p: Стоимость заказа.
+        :param status: Статус заказа.
+        :param pay_m: Способ оплаты.
+        :param user_id: Идентификатор пользователя.
+        :param ufield: Название поля в таблице "User", содержащего идентификатор пользователя.
+        :return: Список, содержащий словари с данными добавленных заказов пользователя.
+        """
+        try:
+            u = User.get(getattr(User, ufield) == user_id)
+            if u:
+                bask_ids = tuple(i.id for i in u.baskets)
+                buff = []
+
+                # получаем номер последнего заказа
+                last_ord_n = Order.select().order_by(Order.id.desc()).first()
+                if not last_ord_n:
+                    last_ord_n = 0
+                else:
+                    last_ord_n = last_ord_n.order_number
+                for b_id in bask_ids:
+                    buff.append(self.add_record("order",
+                                     order_time=ord_tm,
+                                     delivery_time=deliv_tm,
+                                     order_price=ord_p,
+                                     status=status,
+                                     payment_method=pay_m,
+                                     user_id=u.id,
+                                     basket_id=b_id,
+                                     order_number=last_ord_n + 1)
+                                )
+                return buff
+
+            raise ValueError(f"В таблице 'User' нет записи где '{user_id}' = '{user_id}'.")
+
+        except Exception as e:
+            raise
+
+    def add_ords_tg(self, ord_tm: str, deliv_tm: str, ord_p: float, status: str, pay_m: str, user_id: int):
+        """
+        Добавляет записи в таблицу "basket" для каждой корзины пользователя по TG user_id.
+
+        :param ord_tm: Время размещения заказа.
+        :param deliv_tm: Время доставки заказа.
+        :param ord_p: Стоимость заказа.
+        :param status: Статус заказа.
+        :param pay_m: Способ оплаты.
+        :param user_id: Идентификатор пользователя TG.
+        :return: Список, содержащий словари с данными добавленных заказов пользователя.
+        """
+        return self.__add_orders(ord_tm, deliv_tm, ord_p, status, pay_m, user_id, "tg_id")
+
+    def add_ords_vk(self, ord_tm: str, deliv_tm: str, ord_p: float, status: str, pay_m: str, user_id: int):
+        """
+        Добавляет записи в таблицу "basket" для каждой корзины пользователя по VK user_id.
+
+        :param ord_tm: Время размещения заказа.
+        :param deliv_tm: Время доставки заказа.
+        :param ord_p: Стоимость заказа.
+        :param status: Статус заказа.
+        :param pay_m: Способ оплаты.
+        :param user_id: Идентификатор пользователя VK.
+        :return: Список, содержащий словари с данными добавленных заказов пользователя.
+        """
+        return self.__add_orders(ord_tm, deliv_tm, ord_p, status, pay_m, user_id, "vk_id")
+
 
 food_sdb = FoodServiceDB(con)
+# print(food_sdb.delete_all_records("basket", user_id=1))
