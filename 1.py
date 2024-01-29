@@ -49,6 +49,9 @@ ERROR_EXECUTE = data.get("error_execute")
 
 # Текстовый шаблон
 
+# Словарь, где ключи - user_id новых пользователей, а значения номера из `user_introduction`
+u_reg_questions = {}
+
 # Словарь, в который будем класть полученные данные о новом пользователе, для добавления записи о нем в `User`.
 new_user_data = {}
 
@@ -58,11 +61,8 @@ food_cart_data = {}
 # Данные корзины для каждого пользователя
 basket_data = {}
 
-# Словарь содержащий выбранное для измения пользователем поле
-update_udata = {}
-
-# # ID сообщений для очистки
-# message_ids = {}
+# Данные заказов для каждого пользователя
+order_data = {}
 
 
 # bot
@@ -170,11 +170,8 @@ async def handle_command_start(message: Message) -> None:
             await message.answer(text=INTRODUCTION_TEXT["welcome_user"].format(name=name),
                                  reply_markup=get_kb_main_menu())
     else:
+        u_reg_questions[user_id] = 1  # ключ для получения вопроса из `INTRODUCTION_TEXT["user_introduction"]`
         new_user_data[user_id] = {"tg_id": user_id}
-
-        # ключ для получения вопроса из `INTRODUCTION_TEXT["user_introduction"]`
-        new_user_data[user_id]["u_reg_quest"] = 1
-
         await message.answer(text=INTRODUCTION_TEXT["user_introduction"]["0"])
         await message.answer(text=INTRODUCTION_TEXT["user_introduction"]["1"])
 
@@ -229,8 +226,7 @@ async def handle_basket(message: Message) -> None:
             "message_title_id": sent_title_message.message_id,
             "message_order_summary_id": sent_order_summary_message.message_id,
             "order_price": order_price,
-            "basket_items": basket,
-            "ikb": ikb
+            "basket_items": basket
         }
     else:
         await bot.send_message(chat_id=user_id,
@@ -242,63 +238,42 @@ async def handle_text_message(message: Message) -> None:
     user_id = message.from_user.id
 
     # номер вопроса из `INTRODUCTION_TEXT["user_introduction"]` который будем обрабатывать.
-    if new_user_data.get(user_id):
-        n_user = new_user_data[user_id]
-        quest_num = n_user["u_reg_quest"]
-        if quest_num == 1:
-            n_user['name'] = message.text
-            n_user['u_reg_quest'] += 1
-            await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(n_user['u_reg_quest'])])
+    question_number = u_reg_questions.get(user_id)
+    if question_number:
 
-        elif quest_num == 2:
+        if question_number == 1:
+            new_user_data[user_id]['name'] = message.text
+            u_reg_questions[user_id] += 1
+            await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(u_reg_questions[user_id])])
+
+        elif question_number == 2:
             try:
-                n_user['age'] = int(message.text)
-                n_user['u_reg_quest'] += 1
-                await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(n_user['u_reg_quest'])])
+                new_user_data[user_id]['age'] = int(message.text)
+                u_reg_questions[user_id] += 1
+                await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(u_reg_questions[user_id])])
             except ValueError as e:
                 await message.answer(text=INTRODUCTION_TEXT["age_error"])
 
-        elif quest_num == 3:
-            n_user['phone'] = message.text
-            n_user['u_reg_quest'] += 1
-            await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(n_user['u_reg_quest'])])
+        elif question_number == 3:
+            new_user_data[user_id]['phone'] = message.text
+            u_reg_questions[user_id] += 1
+            await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(u_reg_questions[user_id])])
 
-        elif quest_num == 4:
-            n_user['delivery_address'] = message.text
-            n_user['u_reg_quest'] += 1
+        elif question_number == 4:
+            new_user_data[user_id]['delivery_address'] = message.text
+            u_reg_questions[user_id] += 1
 
             # обработать ----------------------------------------------------------------------------------------------
             new_user = food_sdb.add_user(**new_user_data[user_id])
 
-            await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(n_user['u_reg_quest'])])
+            await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(u_reg_questions[user_id])])
 
             # т.к. new_user теперь просто user (: , удаляем его из словарей с данными о новых пользователях.
+            del u_reg_questions[user_id]
             del new_user_data[user_id]
 
             await message.answer(text=INTRODUCTION_TEXT["welcome_user"].format(name=new_user['name']),
                                  reply_markup=get_kb_main_menu())
-
-    # если пользователь изменил данные
-    elif update_udata.get(user_id):
-        field = update_udata[user_id]
-        new_value = message.text
-
-        # проверяем на целое число
-        if field == "age":
-            if not new_value.isdigit():
-                await message.answer(text=INTRODUCTION_TEXT["age_error"])
-                return
-
-        # обновляем поле field таблицы User на new_value
-        if food_sdb.update_record("user", {field: new_value}, tg_id=user_id):
-            await message.answer(text=BASKET_TEXT["update_success_message"])
-
-            # получаем обновленные данные пользователя
-            u = food_sdb.get_urecord_tg(user_id)
-            text = BASKET_TEXT["confirmation_message"].format(name=u['name'], age=u['age'], phone=u['phone'],
-                                                              address=u['delivery_address'])
-            ikb = create_inline_keyboard(buttons=["Подтвердить данные", "Изменить данные"], callback_prefix="ba")
-            await message.answer(text=text, reply_markup=ikb)
 
 
 # dbc - dishes by category
@@ -339,7 +314,6 @@ async def cb_handle_category(callback_query: CallbackQuery) -> None:
 
     # Получаем 5 последних отзывов к выбранному товару
     good_review = food_sdb.get_five_gcomms(good['id'])
-
     if good_review:
         review_text = []
         for gr in good_review:
@@ -555,6 +529,7 @@ async def cb_basket_action(callback_query: CallbackQuery) -> None:
                                                    text=BASKET_TEXT["empty_basket_message"])
 
     elif cb_data == "Подтвердить данные":
+        order_data[user_id] = {}
         buttons = ["Картой", "Наличными при получении"]
         await callback_query.bot.edit_message_text(chat_id=user_id,
                                                    message_id=callback_query.message.message_id,
@@ -573,89 +548,30 @@ async def cb_basket_action(callback_query: CallbackQuery) -> None:
             ord_tm=dtn,
             deliv_tm=dtn + timedelta(minutes=int(mx_cooking_t) + 30),
             ord_p=u_basket_dt["order_price"],
-            status="Оформлен",
+            status="В обработке",
             pay_m=cb_data,
             user_id=user_id,
         )
 
         # очищаем данные пользователя в таблице Basket
-        del_recs = food_sdb.delete_all_records("basket", user_id=u_basket_dt["basket_items"][0]["user_id"]["id"])
-        if del_recs:
-            # создаем список с id сообщений о товарах из корзины
-            del_mess_ids = u_basket_dt["message_ids"]
-            del_mess_ids.append(u_basket_dt["message_title_id"])
+        food_sdb.delete_all_records("basket", id=u_basket_dt["basket_items"][0]["user_id"]["id"])
 
-            # удаляем сообщения с информацией о товарах в корзине
-            await bot.delete_messages(chat_id=user_id, message_ids=del_mess_ids)
+        # создаем список с id сообщений о товарах из корзины
+        del_mess_ids = u_basket_dt["message_ids"]
+        del_mess_ids.append(u_basket_dt["message_title_id"])
 
-            # удаляем эллемент словаря связанный с корзиной пользователя
-            del basket_data[user_id]
+        # удаляем сообщения с информацией о товарах в корзине
+        for m_id in del_mess_ids:
+            await callback_query.bot.delete_message(chat_id=user_id, message_id=m_id)
 
-            # содержимое заказа для чека
-            gs_list = []
-            for bi in u_basket_dt["basket_items"]:
-                t = BASKET_TEXT["checkout_receipt"]["good_info"].format(name=bi['good_id']['name'],
-                                                                        amount=bi['amount'],
-                                                                        price=bi['total_price'])
-                gs_list.append(t)
+        # удаляем эллемент словаря связанный с корзиной пользователя
+        del basket_data[user_id]
 
-            # выводим чек
-            text = BASKET_TEXT["checkout_receipt"]["check_info"].format(datetime=dtn.strftime("%Y-%m-%d %H:%M"),
-                                                                        goods="\n".join(gs_list),
-                                                                        order_number=ord_recs[0]["order_number"],
-                                                                        order_price=ord_recs[0]["order_price"],
-                                                                        address=u_basket_dt["basket_items"][0]["user_id"]["delivery_address"],
-                                                                        phone=u_basket_dt["basket_items"][0]["user_id"]["phone"],
-                                                                        payment=ord_recs[0]["payment_method"])
-            await callback_query.bot.edit_message_text(text=text,
-                                                       chat_id=user_id,
-                                                       message_id=message_id)
-        else:
-            await callback_query.answer(text=ERROR_EXECUTE)
+        # содержимое заказа для чека
+        gs_list = [f"Название: {bi['good_id']['name']}\nКоличество: {bi['amount']}\nСтоимость: {bi['total_price']}" for bi in u_basket_dt["basket_items"]]
 
-    elif cb_data == "Изменить данные":
-        btns = ["Имя", "Возраст", "Номер телефона", "Адрес доставки"]
-        await callback_query.bot.edit_message_text(text=BASKET_TEXT["update_data_message"],
-                                                   chat_id=user_id,
-                                                   message_id=message_id,
-                                                   reply_markup=create_inline_keyboard(buttons=btns,
-                                                                                       callback_prefix="ba"))
-
-    elif cb_data in ("Имя", "Возраст", "Номер телефона", "Адрес доставки"):
-        fields_dicty = {"Имя": "name",
-                        "Возраст": "age",
-                        "Номер телефона": "phone",
-                        "Адрес доставки": "delivery_address"}
-
-
-        # поле, которое выбрал пользователь для изменения
-        f = fields_dicty[cb_data]
-
-        # добавляем его в словарь и чтобы зафиксировать состояние
-        update_udata[user_id] = f
-        await callback_query.bot.edit_message_text(text=BASKET_TEXT["update_questions"][f],
-                                                   chat_id=user_id,
-                                                   message_id=message_id)
-
-
-
-
-
-
-async def main():
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
-
-
-
-
-async def main():
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        # выводим чек
+        text = BASKET_TEXT["checkout_receipt"].format(datetime=dtn.strftime("%Y-%m-%d %H:%M"),
+                                                      order_number=ord_recs[0]["order_number"],
+                                                      )
+        await callback_query.bot.edit_message_text(text=BASKET_TEXT["checkout_receipt"])
