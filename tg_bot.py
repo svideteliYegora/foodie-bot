@@ -5,7 +5,6 @@ import json
 
 import aiogram.exceptions
 from aiogram import Bot, Dispatcher, F
-from aiogram.enums import ChatType
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, FSInputFile, InputMediaPhoto
 from aiogram.utils.keyboard import (
@@ -18,11 +17,13 @@ from aiogram.utils.keyboard import (
 from PIL import Image
 from models import food_sdb
 from datetime import datetime as dtm, timedelta
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 # Получаем config данные
-with open("venv/config.json", "r") as json_file:
+with open("config.json", "r") as json_file:
     config = json.load(json_file)
 
 TG_TOKEN = config.get("TG_TOKEN")
@@ -39,15 +40,22 @@ INTRODUCTION_TEXT = data.get("introduction_text")
 
 CATEGORIES_TEXT = data.get("categories")
 
+# Текст для активных заказов
+ORDER_TEXT = data.get("order")
+
 # Шаблон для карточки блюда
 FOOD_CART_TEXT = data.get("food_cart")
 
 BASKET_TEXT = data.get("basket")
 
-# Текст ошибки выполнения
-ERROR_EXECUTE = data.get("error_execute")
+REVIEW_TEXT = data.get("review")
 
-# Текстовый шаблон
+# Текст ошибки выполнения
+ERROR_EXECUTE_TEXT = data.get("error_execute")
+
+MAIN_MENU = data.get("main_menu_btns")
+
+HELP = data.get("help")
 
 # Словарь, в который будем класть полученные данные о новом пользователе, для добавления записи о нем в `User`.
 new_user_data = {}
@@ -61,13 +69,48 @@ basket_data = {}
 # Словарь содержащий выбранное для измения пользователем поле
 update_udata = {}
 
-# # ID сообщений для очистки
-# message_ids = {}
+# Слоаврь с message_id активных заказов
+ord_message_ids = {}
+
+# Словарь с информацией о заказах
+order_data = {}
+
+# Словарь для формирования коментариев к товарам
+good_comment_data = {}
+
+# ID сообщений для очистки
+mes_ids = {}
 
 
 # bot
 bot = Bot(token=TG_TOKEN)
 dp = Dispatcher()
+
+# Планировщик
+scheduler = AsyncIOScheduler()
+
+
+# Функция которая будет вызываться после успешного выполнения заказа
+async def send_mess_before_successful_order(**kwargs: dict) -> None:
+    """
+    Функция предназначена для отправки сообщения пользователю в заданное время.
+
+    :param kwargs: Словарь с udata - словарь с TG user_id пользователя, и номером заказа .
+    :return: None
+    """
+    udata = kwargs.get("udata", {})
+
+    # Получаем данные заказа
+    ord_dt = food_sdb.get_record('order', order_number=udata["order_number"])
+
+    # Проверяем статус на "Доставлен"
+    if ord_dt and ord_dt["status"].lower() == "доставлен":
+
+        # Отправляем сообщение пользователю с просьбой оценить заказ
+        await bot.send_message(chat_id=udata["user_id"],
+                               text=REVIEW_TEXT["order"]["thank_for_order"],
+                               reply_markup=create_inline_keyboard(buttons=[REVIEW_TEXT["order"]["btn"]],
+                                                                   callback_prefix=f"revo_{ord_dt['order_number']}"))
 
 
 # Клавиатура главного меню
@@ -75,14 +118,14 @@ def get_kb_main_menu() -> ReplyKeyboardMarkup:
     kb_main_menu = ReplyKeyboardMarkup(
         resize_keyboard=True,
         keyboard=[
-            [KeyboardButton(text="🍽️ Категории Блюд")],
+            [KeyboardButton(text=MAIN_MENU["categories"])],
             [
-                KeyboardButton(text="🛒 Корзина"),
-                KeyboardButton(text="🚚 Активные заказы")
+                KeyboardButton(text=MAIN_MENU["basket"]),
+                KeyboardButton(text=MAIN_MENU["active_orders"])
             ],
             [
-                KeyboardButton(text="✏️ Добавить отзыв"),
-                KeyboardButton(text="❓  Справка")
+                KeyboardButton(text=MAIN_MENU["add_review"]),
+                KeyboardButton(text=MAIN_MENU["help"])
             ],
         ]
     )
@@ -111,17 +154,23 @@ def get_ikb_food_cart(number1: int, number2: int, amount: int = 1) -> InlineKeyb
 
 
 # Для создания инлайн-клавиатур
-def create_inline_keyboard(buttons: list[str], callback_prefix: str) -> InlineKeyboardMarkup:
+def create_inline_keyboard(buttons: list[str] = None, callback_prefix: str = None, btns_dct: dict = None) -> InlineKeyboardMarkup:
     '''
-    Создает инлайн-клавиатуру на основе переданных параметров.
+    Создает инлайн-клавиатуру на основе переданных параметров. Аргумент 'btns_dct' имеет высший приоритет, это значит,
+    что, если он был передан функции то функция создаст клавиатуру на его основе, в ином случае функция
 
     :param buttons: Список строковых значений, которые будут использоватся в качестве названий кнопок.
     :param callback_prefix: Префикс для формирования callback_data. Каждый callback_data будет иметь вид "{callback_prefix}_{название кнопки}".
+    :param btns_dct: Параметр, представляющий словарь, где пары: (кнопки - коллбэк данные).
     :return: Возвращает экземпляр класса `InlineKeyboardMarkup` (готовую клавиатуру)
     '''
     builder = InlineKeyboardBuilder()
-    for btn_txt in buttons:
-        builder.button(text=btn_txt, callback_data=f"{callback_prefix}_{btn_txt}")
+    if btns_dct:
+        for btn, cb_dt in btns_dct.items():
+            builder.button(text=btn, callback_data=cb_dt)
+    else:
+        for btn_txt in buttons:
+            builder.button(text=btn_txt, callback_data=f"{callback_prefix}_{btn_txt}")
     builder.adjust(1)
 
     return builder.as_markup()
@@ -154,21 +203,9 @@ async def handle_command_start(message: Message) -> None:
 
     # получаем кортеж всех TG пользователей из таблицы User и проверяем на нового пользователя
     if user_id in food_sdb.get_tg_ids():
-
-        # проверяем пишет ли он из групового чата
-        if message.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
-            # если это чат для админов
-            if message.chat.id == ADMINS_CHAT_ID:
-                await bot.send_message(chat_id=message.chat.id,
-                                       text=INTRODUCTION_TEXT["welcome_admin"],
-                                       reply_markup=None)  # панель админов
-            else:
-                await bot.send_message(chat_id=message.chat.id,
-                                       text=INTRODUCTION_TEXT["away_message"])
-        else:
-            name = food_sdb.get_urecord_tg(user_id)['name']
-            await message.answer(text=INTRODUCTION_TEXT["welcome_user"].format(name=name),
-                                 reply_markup=get_kb_main_menu())
+        name = food_sdb.get_urecord_tg(user_id)['name']
+        await message.answer(text=INTRODUCTION_TEXT["welcome_user"].format(name=name),
+                               reply_markup=get_kb_main_menu())
     else:
         new_user_data[user_id] = {"tg_id": user_id}
 
@@ -179,16 +216,23 @@ async def handle_command_start(message: Message) -> None:
         await message.answer(text=INTRODUCTION_TEXT["user_introduction"]["1"])
 
 
-@dp.message(F.text == "🍽️ Категории Блюд")
+@dp.message(Command("help"))
+async def handle_command_help(message: Message) -> None:
+    await message.answer(text=HELP)
+
+
+@dp.message(F.text == MAIN_MENU["categories"])
 async def handle_food_categories(message: Message) -> None:
+    user_id = message.from_user.id
+
     # кортеж всех уникальных категорий блюд для создания кнопок
     categories = food_sdb.get_uniq_cats()
-    food_cart_data[message.from_user.id] = {"categories": categories}
+    food_cart_data[user_id] = {"categories": categories}
     await message.answer(text=CATEGORIES_TEXT,
-                         reply_markup=create_inline_keyboard(buttons=categories, callback_prefix="dbc"))
+                           reply_markup=create_inline_keyboard(buttons=categories, callback_prefix="dbc"))
 
 
-@dp.message(F.text == "🛒 Корзина")
+@dp.message(F.text == MAIN_MENU["basket"])
 async def handle_basket(message: Message) -> None:
     user_id = message.from_user.id
 
@@ -237,51 +281,130 @@ async def handle_basket(message: Message) -> None:
                                text=BASKET_TEXT["empty_basket_message"])
 
 
+@dp.message(F.text == MAIN_MENU["active_orders"])
+async def active_orders(message: Message) -> None:
+    user_id = message.from_user.id
+
+    # Полуаем список активных заказов
+    ords = food_sdb.get_uactive_order_tg(user_id)
+
+    if ords:
+        # Отправляем заголовок
+        await message.answer(text=ORDER_TEXT["title"])
+
+        # Создаем клавиатуру с кнопкой "отменить заказ"
+        ikb = create_inline_keyboard(buttons=["Отменить заказ"], callback_prefix="oa")
+
+        # Создаем словарь для добавления message_id активных заказов пользователя
+        order_data[user_id] = {}
+
+        # Проходим циклом и отправляем сообщение с информацие о каждом заказе
+        for ord in ords:
+            # Список с текстом с информацией о товарах в заказе
+            goodst = []
+
+            # Проходим циклом по всем корзинам в заказе и заполняем список информацией о товаре
+            for basket in ord["basket_id"]:
+                goodst.append(ORDER_TEXT["good_info"].format(
+                    name=basket["good_id"]["name"],
+                    amount=basket["amount"],
+                    price=basket["total_price"])
+                )
+
+            text = ORDER_TEXT["order_info"].format(
+                order_number=ord["order_number"],
+                order_time=ord["order_time"].strftime("%Y-%m-%d %H:%M"),
+                delivery_time=ord["delivery_time"].strftime("%Y-%m-%d %H:%M"),
+                goods="\n".join(goodst),
+                order_price=ord["order_price"],
+                payment=ord["payment_method"],
+                address=ord["delivery_address"],
+                user_name=ord["user_name"],
+                age=ord["age"],
+                phone=ord["phone"],
+            )
+            s_mes = await message.answer(text=text, reply_markup=ikb)
+            order_data[user_id][s_mes.message_id] = ord["order_number"]
+    else:
+        await message.answer(text=ORDER_TEXT["no_active_orders"])
+
+
+@dp.message(F.text == MAIN_MENU["add_review"])
+async def add_review(message: Message) -> None:
+    user_id = message.from_user.id
+
+    # Получаем все товары пользователя которые он заказывал
+    ugoods = food_sdb.get_uordered_goods_tg(user_id)
+    if ugoods:
+        await message.answer(text=REVIEW_TEXT["good"]["title"])
+        for g in ugoods:
+            text = REVIEW_TEXT["good"]["good_info"].format(name=g["name"], category=g["category"],
+                                                           description=g["description"])
+            img = g.get('tg_image_id')
+            if not img:
+                # уставнавливаем размер изображения (300, 300) используя функцию `resize_image`
+                resize_image(g['image'])
+                img = FSInputFile(g['image'])
+            ikb = create_inline_keyboard(buttons=REVIEW_TEXT["good"]["btn"], callback_prefix=f"revg_{g['id']}")
+            await bot.send_photo(chat_id=user_id,
+                                 photo=img,
+                                 caption=text,
+                                 reply_markup=ikb)
+    else:
+        await message.answer(text=REVIEW_TEXT["good"]["no_goods"])
+
+
 @dp.message(F.text)
 async def handle_text_message(message: Message) -> None:
     user_id = message.from_user.id
+    mdt = message.text
 
     # номер вопроса из `INTRODUCTION_TEXT["user_introduction"]` который будем обрабатывать.
     if new_user_data.get(user_id):
         n_user = new_user_data[user_id]
         quest_num = n_user["u_reg_quest"]
         if quest_num == 1:
-            n_user['name'] = message.text
+            n_user['name'] = mdt
             n_user['u_reg_quest'] += 1
             await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(n_user['u_reg_quest'])])
 
         elif quest_num == 2:
             try:
-                n_user['age'] = int(message.text)
+                n_user['age'] = int(mdt)
                 n_user['u_reg_quest'] += 1
                 await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(n_user['u_reg_quest'])])
             except ValueError as e:
                 await message.answer(text=INTRODUCTION_TEXT["age_error"])
 
         elif quest_num == 3:
-            n_user['phone'] = message.text
+            n_user['phone'] = mdt
             n_user['u_reg_quest'] += 1
             await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(n_user['u_reg_quest'])])
 
         elif quest_num == 4:
-            n_user['delivery_address'] = message.text
+            n_user['delivery_address'] = mdt
             n_user['u_reg_quest'] += 1
 
-            # обработать ----------------------------------------------------------------------------------------------
-            new_user = food_sdb.add_user(**new_user_data[user_id])
+            new_user = food_sdb.add_record("user", **new_user_data[user_id])
+            if new_user:
+                await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(n_user['u_reg_quest'])])
 
-            await message.answer(text=INTRODUCTION_TEXT["user_introduction"][str(n_user['u_reg_quest'])])
+                # т.к. new_user теперь просто user (: , удаляем его из словарей с данными о новых пользователях.
+                del new_user_data[user_id]
+                await message.answer(text=INTRODUCTION_TEXT["welcome_user"].format(name=new_user['name']),
+                                     reply_markup=get_kb_main_menu())
+            else:
+                await message.answer(text=ERROR_EXECUTE_TEXT)
 
-            # т.к. new_user теперь просто user (: , удаляем его из словарей с данными о новых пользователях.
+            # Удаляем данные пользователя из словаря
             del new_user_data[user_id]
 
-            await message.answer(text=INTRODUCTION_TEXT["welcome_user"].format(name=new_user['name']),
-                                 reply_markup=get_kb_main_menu())
-
-    # если пользователь изменил данные
+    # пользователь изменил данные
     elif update_udata.get(user_id):
         field = update_udata[user_id]
-        new_value = message.text
+
+        del update_udata[user_id]
+        new_value = mdt
 
         # проверяем на целое число
         if field == "age":
@@ -299,6 +422,30 @@ async def handle_text_message(message: Message) -> None:
                                                               address=u['delivery_address'])
             ikb = create_inline_keyboard(buttons=["Подтвердить данные", "Изменить данные"], callback_prefix="ba")
             await message.answer(text=text, reply_markup=ikb)
+
+    # текст для коммента к заказу
+    elif order_data.get(user_id) and order_data[user_id].get("review"):
+        ord_com = mdt
+        ord_n = order_data[user_id]["review"]["order_number"]
+
+        # добовляем текст отзыва к уже существующей записи в ordercomment
+        if food_sdb.update_record("ordercomment", {"text": ord_com}, order_number=ord_n):
+            await message.answer(text=REVIEW_TEXT["order"]["answer_comment"])
+            del order_data[user_id]["review"]
+        else:
+            await message.answer(text=ERROR_EXECUTE_TEXT)
+
+    # текст для коммента к товару
+    elif good_comment_data.get(user_id) and good_comment_data[user_id].get("goodcomment_id"):
+        g_com = mdt
+        gc_id = good_comment_data[user_id]["goodcomment_id"]
+
+        # добавляем текст отзыва к уже существующей записи в goodcomment
+        if food_sdb.update_record("goodcomment", {"text": g_com}, id=gc_id):
+            await message.answer(text=REVIEW_TEXT["order"]["answer_comment"])
+            del good_comment_data[user_id]
+        else:
+            await message.answer(text=ERROR_EXECUTE_TEXT)
 
 
 # dbc - dishes by category
@@ -385,8 +532,6 @@ async def cb_amount_change(callback_query: CallbackQuery) -> None:
     except aiogram.exceptions.TelegramBadRequest as e:
         if "message is not modified" in str(e):
             await callback_query.answer(text=FOOD_CART_TEXT["amount_goods_error"])
-        else:
-            raise
 
 
 @dp.callback_query(F.data.in_({"back", "next"}))
@@ -453,7 +598,7 @@ async def cb_add_to_basket(callback_query: CallbackQuery) -> None:
 
     # удаляем всзаписи пользователя с одинаковым товаром (good_id)
     u_id = food_sdb.get_urecord_tg(user_id)
-    food_sdb.delete_all_records('basket', good_id=current_good['id'], user_id=u_id['id'])
+    food_sdb.delete_all_records('basket', good_id=current_good['id'], user_id=u_id['id'], added_to_order=False)
 
 
     total_amount = 0
@@ -462,24 +607,27 @@ async def cb_add_to_basket(callback_query: CallbackQuery) -> None:
         total_amount += basket_entry[0]
         total_price += basket_entry[1]
 
-    # добавляем новую звпись в `Baskets`
-    basket = food_sdb.add_record('basket', amount=f_cart["amount"] + total_amount,
-                                 total_price=f_cart["amount"] * current_good["price"] + total_price,
-                                 user_id=food_sdb.get_urecord_tg(user_id)["id"], good_id=current_good["id"])
-    f_cart["amount"] = 1
+    # если товар не на стопе то, добавляем новую звпись в `Baskets`
+    if current_good["available"]:
+        basket = food_sdb.add_record('basket', amount=f_cart["amount"] + total_amount,
+                                     total_price=f_cart["amount"] * current_good["price"] + total_price,
+                                     user_id=food_sdb.get_urecord_tg(user_id)["id"], good_id=current_good["id"])
+        f_cart["amount"] = 1
 
-    try:
-        await callback_query.bot.edit_message_reply_markup(chat_id=user_id,
-                                                           message_id=user_id,
-                                                           reply_markup=get_ikb_food_cart(
-                                                               number1=good_number,
-                                                               number2=f_cart["len_goods_list"],
-                                                               amount=f_cart["amount"]
-                                                           ))
-    except Exception as e:
-        pass
+        try:
+            await callback_query.bot.edit_message_reply_markup(chat_id=user_id,
+                                                               message_id=user_id,
+                                                               reply_markup=get_ikb_food_cart(
+                                                                   number1=good_number,
+                                                                   number2=f_cart["len_goods_list"],
+                                                                   amount=f_cart["amount"]
+                                                               ))
+        except Exception as e:
+            pass
 
-    await callback_query.answer(text=FOOD_CART_TEXT["basket_add_success"])
+        await callback_query.answer(text=FOOD_CART_TEXT["basket_add_success"])
+    else:
+        await callback_query.answer(text=FOOD_CART_TEXT["good_stop"])
 
 
 # rfb - remove from basket
@@ -500,7 +648,6 @@ async def cb_remove_from_basket(callback_query: CallbackQuery) -> None:
 
     # удаляем товар из корзины в `Basket`
     del_g = food_sdb.delete_record('basket', id=basket_item['id'])
-    print(del_g)
     # удаляем соощбщение с товаром
     await bot.delete_message(chat_id=user_id, message_id=message_id)
 
@@ -542,13 +689,15 @@ async def cb_basket_action(callback_query: CallbackQuery) -> None:
 
     elif cb_data == "Очистить корзину":
 
+        for bi in u_basket_dt["basket_items"]:
+            food_sdb.delete_record('basket', id=bi['id'])
+
         await bot.delete_message(chat_id=user_id, message_id=u_basket_dt['message_title_id'])
         u_basket_dt["order_price"] = 0
         for message_id in u_basket_dt["message_ids"]:
             await bot.delete_message(chat_id=user_id, message_id=message_id)
         u_basket_dt["message_ids"].clear()
-        for bi in u_basket_dt["basket_items"]:
-            food_sdb.delete_record('basket', id=bi['id'])
+
 
         await callback_query.bot.edit_message_text(chat_id=user_id,
                                                    message_id=callback_query.message.message_id,
@@ -565,22 +714,37 @@ async def cb_basket_action(callback_query: CallbackQuery) -> None:
         # рассчитываем время приготовления
         mx_cooking_t = max([i["good_id"]["cooking_time"] for i in u_basket_dt["basket_items"]])
 
-        # данные для создания ордера
+        # дата для создания ордера
         dtn = dtm.now()
+
+        # Рассчитываем время доставки
+        deliv_tm = dtn + timedelta(minutes=int(mx_cooking_t) + 30)
 
         # добавляем новые ордеры и получаем их
         ord_recs = food_sdb.add_ords_tg(
             ord_tm=dtn,
-            deliv_tm=dtn + timedelta(minutes=int(mx_cooking_t) + 30),
+            deliv_tm=deliv_tm,
             ord_p=u_basket_dt["order_price"],
             status="Оформлен",
             pay_m=cb_data,
             user_id=user_id,
+            deliv_address=u["delivery_address"],
+            uname=u["name"],
+            age=u["age"],
+            phone=u["phone"]
         )
 
-        # очищаем данные пользователя в таблице Basket
-        del_recs = food_sdb.delete_all_records("basket", user_id=u_basket_dt["basket_items"][0]["user_id"]["id"])
-        if del_recs:
+        # Вычисляем время выполнения задачи, добавляем к времени доставки 5 мин
+        scheduled_time = deliv_tm + timedelta(minutes=5)
+
+        # Добавляем задачу в планировщик
+        udata = {"user_id": user_id, "order_number": ord_recs[0]["order_number"]}
+        scheduler.add_job(send_mess_before_successful_order, 'date', run_date=scheduled_time, kwargs={"udata": udata})
+
+        # ставим поля Basket.added_to_order в значение True
+        # тем самым как бы очищаем корзину пользователя показывая что заказ оформлен
+        up_fields = food_sdb.basket_change_added_to_ord_tg(user_id)
+        if up_fields:
             # создаем список с id сообщений о товарах из корзины
             del_mess_ids = u_basket_dt["message_ids"]
             del_mess_ids.append(u_basket_dt["message_title_id"])
@@ -606,12 +770,16 @@ async def cb_basket_action(callback_query: CallbackQuery) -> None:
                                                                         order_price=ord_recs[0]["order_price"],
                                                                         address=u_basket_dt["basket_items"][0]["user_id"]["delivery_address"],
                                                                         phone=u_basket_dt["basket_items"][0]["user_id"]["phone"],
-                                                                        payment=ord_recs[0]["payment_method"])
+                                                                        payment=ord_recs[0]["payment_method"],
+                                                                        user_name=u["name"],
+                                                                        age=u["age"])
             await callback_query.bot.edit_message_text(text=text,
                                                        chat_id=user_id,
                                                        message_id=message_id)
+            await callback_query.message.answer(text=BASKET_TEXT["checkout_receipt"]["footer_text"])
+
         else:
-            await callback_query.answer(text=ERROR_EXECUTE)
+            await callback_query.answer(text=ERROR_EXECUTE_TEXT)
 
     elif cb_data == "Изменить данные":
         btns = ["Имя", "Возраст", "Номер телефона", "Адрес доставки"]
@@ -638,24 +806,131 @@ async def cb_basket_action(callback_query: CallbackQuery) -> None:
                                                    message_id=message_id)
 
 
+# oa - order action
+@dp.callback_query(F.data.startswith("oa"))
+async def cb_order_action(callback_query: CallbackQuery) -> None:
+    user_id = callback_query.from_user.id
+    cb_data = callback_query.data.split("_")[1]
+
+    # Получаем message_id для заказа который пользователь хочет отменить
+    m_id = callback_query.message.message_id
+
+    # Пользователь отменяет заказ
+    if cb_data == ORDER_TEXT["cancel_btn"]:
+        # Получаем номер заказа
+        ord_n = order_data[user_id][m_id]
+
+        # Помечаем номер отмененного заказа
+        order_data[user_id]["cancel_ord_num"] = ord_n
+
+        # Отменяем заказ
+        res = food_sdb.cancel_order_tg(user_id, ord_n)
+        if res:
+            # Удаляем сообщение о заказе
+            await callback_query.bot.delete_message(chat_id=user_id, message_id=m_id)
+            del order_data[user_id][m_id]
+
+            # Выводим сообщение об успешной отмене
+            await callback_query.message.answer(text=ORDER_TEXT["cancel_order"]["successful_cancel_order"])
+
+            # Просим пользователя указать причну отмены
+            ikb = create_inline_keyboard(buttons=ORDER_TEXT["cancel_order"]["cancellation_reason_buttons"],
+                                         callback_prefix="oa")
+            await callback_query.message.answer(text=ORDER_TEXT["cancel_order"]["title"], reply_markup=ikb)
+
+    # Пользователь указал причину отмены
+    elif cb_data in ORDER_TEXT["cancel_order"]["cancellation_reason_buttons"]:
+        # Добавляем причину отмены в таблицу Order
+        ord_n = order_data[user_id]["cancel_ord_num"]
+        if food_sdb.update_record("order", {"cancellation_reason": cb_data.strip()}, order_number=ord_n):
+            del order_data[user_id]["cancel_ord_num"]
+            await callback_query.bot.edit_message_text(text=ORDER_TEXT["cancel_order"]["thank_text"],
+                                                       chat_id=user_id,
+                                                       message_id=callback_query.message.message_id)
+        else:
+            await callback_query.answer(text=ERROR_EXECUTE_TEXT)
 
 
+@dp.callback_query(F.data.startswith("eval"))
+async def cb_evaluation(callback_query: CallbackQuery) -> None:
+    user_id = callback_query.from_user.id
+    cb_data = callback_query.data.split("_")
+
+    # данные пользователя
+    u = food_sdb.get_urecord_tg(user_id)
+
+    # оценка из callback_data
+    ev = cb_data[1]
+
+    # оценка для заказа
+    if cb_data[0] == "evalord":
+        # Добавляем запись в таблицу ordercomment
+        ord_n = order_data[user_id]["review"]["order_number"]
+        if food_sdb.add_record("ordercomment", eval=ev, validate=False, user_id=u["id"], order_number=ord_n):
+            # отправляем сообщение с просьбой написать коммент
+            await callback_query.bot.edit_message_text(text=REVIEW_TEXT["order"]["order_comment"],
+                                                       chat_id=user_id,
+                                                       message_id=callback_query.message.message_id)
+        else:
+            await callback_query.answer(text=ERROR_EXECUTE_TEXT)
+
+    elif cb_data[0] == "evalgood":
+        # Добавляем запись в таблицу goodcomment
+        good_id = good_comment_data[user_id]["good_id"]
+        nrec = food_sdb.add_record("goodcomment", eval=ev, validate=False, user_id=u["id"], good_id=good_id)
+        if nrec:
+            good_comment_data[user_id]["goodcomment_id"] = nrec["id"]
+
+            # отправляем сообщение с просьбой написать коммент
+            await callback_query.bot.edit_message_text(text=REVIEW_TEXT["good"]["good_comment"],
+                                                       chat_id=user_id,
+                                                       message_id=callback_query.message.message_id)
+        else:
+            await callback_query.answer(text=ERROR_EXECUTE_TEXT)
+
+
+@dp.callback_query(F.data.startswith("rev"))
+async def cb_review(callback_query: CallbackQuery) -> None:
+    user_id = callback_query.from_user.id
+    cb_data = callback_query.data.split("_")
+    m_id = callback_query.message.message_id
+
+    # отзвыв к заказу
+    if cb_data[0] == "revo":
+
+        # Получаем из callback_data номер заказа
+        ord_n = int(cb_data[1])
+
+        # Фиксируем состояние, добавляем соответствующую запись в словарь
+        order_data[user_id]["review"] = {"order_number": ord_n}
+
+        # Отправляем сообщение где просим поставить оценку
+        ikb = create_inline_keyboard(btns_dct=REVIEW_TEXT["order"]["eval_btns_dict"])
+        await callback_query.bot.edit_message_text(chat_id=user_id,
+                                                   message_id=m_id,
+                                                   text=REVIEW_TEXT["order"]["eval_text"],
+                                                   reply_markup=ikb)
+
+    # отзвыв к товару
+    elif cb_data[0] == "revg":
+        # Получаем из callback_data id товара
+        good_id = int(cb_data[1])
+
+        # Фиксируем состояние, добавляем соответствующую запись в словарь
+        good_comment_data[user_id] = {"good_id": good_id}
+
+        # Отправляем сообщение где просим поставить оценку
+        ikb = create_inline_keyboard(btns_dct=REVIEW_TEXT["good"]["eval_btns_dict"])
+        await callback_query.message.answer(text=REVIEW_TEXT["good"]["eval_text"], reply_markup=ikb)
 
 
 async def main():
+    scheduler.start()
     await dp.start_polling(bot)
 
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
 
-
-
-
-
-async def main():
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        asyncio.run(main())
+    finally:
+        scheduler.shutdown()
