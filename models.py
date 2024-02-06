@@ -547,6 +547,46 @@ class FoodServiceDB:
         return self.__get_uactive_order(user_id, "tg_id")
 
     @staticmethod
+    def get_order_by_ordnum(order_number: int) -> Dict:
+        """
+        Получение словаря с информацией о заказе по номеру заказа.
+
+        :param order_number: Номер заказа
+        :return: Словарь с данными о заказе, пользователе, содержимом корзины, товарах.
+        """
+
+        try:
+            odt = Order.select().where(Order.order_number == order_number)
+            dt = {}
+            for num, itm in enumerate(odt):
+                bask = Basket.get(Basket.id == itm.basket_id)
+                good = Good.get(Good.id == bask.good_id)
+                user = User.get(User.id == itm.user_id)
+                udt = user.__data__
+                bdt = bask.__data__
+                bdt["user_id"] = udt
+                gdt = good.__data__
+                gdt["user_id"] = udt
+                bdt["good_id"] = gdt
+                if num:
+                    dt["basket_id"].append(bdt)
+                else:
+                    ord = itm.__data__
+                    ord["basket_id"] = [bdt]
+                    ord["user_id"] = udt
+                    dt = ord
+            return dt
+        except Order.DoesNotExist:
+            raise ValueError("Запись в таблице 'Order' не существует.")
+        except User.DoesNotExist:
+            raise ValueError("Запись в таблице 'User' не существует.")
+        except Basket.DoesNotExist:
+            raise ValueError("Запись в таблице 'Basket' не существует.")
+        except Good.DoesNotExist:
+            raise ValueError("Запись в таблице 'Good' не существует.")
+
+
+    @staticmethod
     def __get_delivered_order(user_id: int, field: str) -> Dict:
         try:
             data = []
