@@ -118,5 +118,6 @@
     "statuses_btns": ["В пути", "Доставлен", "Отменен"],
     "cancel_order": "Пользователь отменил заказ # {order_number}",
     "cancellation_reason": "Пользователь указал причину отмены заказа # {order_number}\nПричина:\n{cancellation_reason}"
-  }
+  },
+  "blacklist": "Вы были добавлены в черный список ❗️"
 }
