@@ -23,7 +23,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 # Получаем config данные
-with open("resources/config.json", "r") as json_file:
+with open("venv/config.json", "r") as json_file:
     config = json.load(json_file)
 
 TG_TOKEN = config.get("TG_TOKEN")
